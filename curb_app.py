@@ -15,6 +15,7 @@ import streamlit as st
 
 from curb_config import (
     COCO_CATEGORIES,
+    WORLD_CATEGORIES,
     CATEGORY_COLORS_RGB,
     DEFAULT_ROI_LABELS,
     OVERLAP_THRESHOLD,
@@ -23,12 +24,15 @@ from curb_config import (
     YOLO_CONFIDENCE,
     YOLO_IOU_NMS,
     YOLO_MODEL_NAME,
+    YOLO_WORLD_CONFIDENCE,
     ZONE_COLORS_RGB,
     BEHAVIOR_COLORS_RGB,
     DEFAULT_OUTPUT_DIR,
 )
 from curb_detection import (
     StreetSceneDetector,
+    InfrastructureDetector,
+    CombinedDetector,
     FrameResult,
     load_roi_polygons,
     build_roi_masks,
@@ -61,9 +65,9 @@ st.sidebar.title("Settings")
 
 model_name = st.sidebar.selectbox(
     "YOLO Model",
-    ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt"],
+    ["yolov8s.pt", "yolov8m.pt", "yolov8n.pt"],
     index=0,
-    help="nano = fastest, medium = most accurate",
+    help="small = good balance, medium = most accurate, nano = fastest",
 )
 yolo_conf = st.sidebar.slider(
     "Detection Confidence", 0.10, 0.90, YOLO_CONFIDENCE, 0.05,
@@ -80,9 +84,23 @@ batch_size = st.sidebar.slider(
     "Batch Size", 1, 32, DEFAULT_BATCH_SIZE, 1,
 )
 
+# --- YOLO-World toggle ---
+st.sidebar.divider()
+enable_world = st.sidebar.toggle(
+    "YOLO-World (infrastructure)",
+    value=True,
+    help="Detect bollards, bike lanes, scaffolding, food carts, dumpsters, etc.",
+)
+world_conf = st.sidebar.slider(
+    "World Confidence", 0.05, 0.50, YOLO_WORLD_CONFIDENCE, 0.05,
+    help="Open-vocab detection threshold (lower = more detections)",
+) if enable_world else YOLO_WORLD_CONFIDENCE
+
 # --- Category Toggles ---
 st.sidebar.divider()
 st.sidebar.subheader("Detection Categories")
+
+st.sidebar.caption("COCO classes")
 selected_categories: list[str] = []
 for cat_name in COCO_CATEGORIES.keys():
     if st.sidebar.checkbox(
@@ -92,12 +110,25 @@ for cat_name in COCO_CATEGORIES.keys():
     ):
         selected_categories.append(cat_name)
 
+if enable_world:
+    st.sidebar.caption("YOLO-World classes")
+    selected_world_categories: list[str] = []
+    for cat_name in WORLD_CATEGORIES.keys():
+        if st.sidebar.checkbox(
+            cat_name.replace("_", " ").title(),
+            value=True,
+            key=f"wcat_{cat_name}",
+        ):
+            selected_world_categories.append(cat_name)
+else:
+    selected_world_categories = []
+
 # ------------------------------------------------------------------ #
 #  Detector Cache
 # ------------------------------------------------------------------ #
 
 @st.cache_resource
-def get_detector(
+def get_coco_detector(
     mn: str, conf: float, iou: float, cats: frozenset | None = None,
 ) -> StreetSceneDetector:
     return StreetSceneDetector(
@@ -106,6 +137,23 @@ def get_detector(
         iou_threshold=iou,
         categories=set(cats) if cats else None,
     )
+
+
+@st.cache_resource
+def get_world_detector(conf: float, iou: float) -> InfrastructureDetector:
+    return InfrastructureDetector(confidence=conf, iou_threshold=iou)
+
+
+def build_detector(
+    mn: str, conf: float, iou: float,
+    cats: frozenset | None, use_world: bool, world_conf: float,
+):
+    """Build the appropriate detector based on settings."""
+    coco = get_coco_detector(mn, conf, iou, cats)
+    if use_world:
+        world = get_world_detector(world_conf, iou)
+        return CombinedDetector(coco, world)
+    return coco
 
 
 # ------------------------------------------------------------------ #
@@ -262,7 +310,10 @@ with tab_analyze:
             analysis_path = tmp.name
 
         cats_frozen = frozenset(selected_categories) if selected_categories else None
-        detector = get_detector(model_name, yolo_conf, YOLO_IOU_NMS, cats_frozen)
+        detector = build_detector(
+            model_name, yolo_conf, YOLO_IOU_NMS,
+            cats_frozen, enable_world, world_conf,
+        )
 
         if is_video:
             meta = get_video_metadata(analysis_path)
@@ -355,6 +406,7 @@ with tab_analyze:
             cat_cols = [
                 "total_vehicles", "pedestrians", "cyclists",
                 "street_infrastructure", "animals", "personal_items", "street_furniture",
+                "road_infrastructure", "road_markings", "construction", "vendors", "waste",
             ]
             available = [c for c in cat_cols if c in ts_df.columns and ts_df[c].sum() > 0]
             if available:

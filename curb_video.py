@@ -11,6 +11,7 @@ import pandas as pd
 
 from curb_config import (
     COCO_CATEGORIES,
+    WORLD_CATEGORIES,
     DEFAULT_FRAME_SKIP,
     DEFAULT_BATCH_SIZE,
     DEFAULT_OUTPUT_DIR,
@@ -94,7 +95,7 @@ def iter_video_frames(
 def process_video(
     video_path: str | Path,
     roi_polygons: dict[str, list[tuple[int, int]]],
-    detector: Optional[StreetSceneDetector] = None,
+    detector=None,
     frame_skip: int = DEFAULT_FRAME_SKIP,
     batch_size: int = DEFAULT_BATCH_SIZE,
     overlap_threshold: float = OVERLAP_THRESHOLD,
@@ -106,7 +107,7 @@ def process_video(
     Args:
         video_path: path to video file
         roi_polygons: dict from load_roi_polygons()
-        detector: StreetSceneDetector instance (created if None)
+        detector: StreetSceneDetector, CombinedDetector, etc. (created if None)
         frame_skip: process every Nth frame
         batch_size: frames per YOLO inference batch
         overlap_threshold: minimum overlap ratio
@@ -156,7 +157,7 @@ def process_video(
 def _process_batch(
     frames: list[np.ndarray],
     meta: list[tuple[int, float]],
-    detector: StreetSceneDetector,
+    detector,
     roi_masks: dict[str, np.ndarray],
     overlap_threshold: float,
     results_out: list[FrameResult],
@@ -182,7 +183,7 @@ def _process_batch(
 def process_image(
     image_path: str | Path,
     roi_polygons: dict[str, list[tuple[int, int]]],
-    detector: Optional[StreetSceneDetector] = None,
+    detector=None,
     overlap_threshold: float = OVERLAP_THRESHOLD,
 ) -> FrameResult:
     """Process a single image file."""
@@ -214,6 +215,12 @@ def results_to_dataframe(results: list[FrameResult]) -> pd.DataFrame:
             "animals": fr.category_counts.get("animal", 0),
             "personal_items": fr.category_counts.get("personal_item", 0),
             "street_furniture": fr.category_counts.get("street_furniture", 0),
+            # YOLO-World categories
+            "road_infrastructure": fr.category_counts.get("road_infrastructure", 0),
+            "road_markings": fr.category_counts.get("road_marking", 0),
+            "construction": fr.category_counts.get("construction", 0),
+            "vendors": fr.category_counts.get("vendor", 0),
+            "waste": fr.category_counts.get("waste", 0),
             "curb_occupied": fr.curb_occupied_count,
             "travel_occupied": fr.travel_occupied_count,
             "bike_encroachment": fr.bike_encroachment_count,
@@ -294,10 +301,11 @@ def compute_summary_stats(results: list[FrameResult]) -> dict:
             category_totals[cat] = category_totals.get(cat, 0) + cnt
     stats["category_breakdown"] = category_totals
 
-    # Per-category averages
+    # Per-category averages (both COCO and YOLO-World categories)
+    all_category_names = list(COCO_CATEGORIES.keys()) + list(WORLD_CATEGORIES.keys())
     category_per_frame: dict[str, list[int]] = {}
     for fr in results:
-        for cat in COCO_CATEGORIES.keys():
+        for cat in all_category_names:
             category_per_frame.setdefault(cat, []).append(fr.category_counts.get(cat, 0))
     stats["avg_per_frame_by_category"] = {
         cat: round(sum(vals) / total_frames, 1)

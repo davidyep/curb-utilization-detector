@@ -10,6 +10,7 @@ COCO_CATEGORIES: dict[str, dict[int, str]] = {
         2: "car",
         3: "motorcycle",
         5: "bus",
+        6: "train",
         7: "truck",
     },
     "pedestrian": {
@@ -17,6 +18,7 @@ COCO_CATEGORIES: dict[str, dict[int, str]] = {
     },
     "cyclist": {
         1: "bicycle",
+        36: "skateboard",
     },
     "street_infrastructure": {
         9: "traffic light",
@@ -56,15 +58,81 @@ ALL_TRACKED_CLASS_IDS: set[int] = set(COCO_CLASS_LOOKUP.keys())
 # Backward-compatible alias
 VEHICLE_CLASS_IDS: dict[int, str] = COCO_CATEGORIES["vehicle"]
 
+
+# --------------- YOLO-World Open-Vocabulary Detection --------------- #
+
+YOLO_WORLD_MODEL_NAME: str = "yolov8s-worldv2.pt"
+YOLO_WORLD_CONFIDENCE: float = 0.15  # lower than COCO — open-vocab is less certain
+
+# Custom classes for YOLO-World, grouped by category.
+# These cover NYC street objects that COCO cannot detect.
+WORLD_CATEGORIES: dict[str, list[str]] = {
+    "road_infrastructure": [
+        "bollard",
+        "traffic cone",
+        "jersey barrier",
+        "barricade",
+        "bike rack",
+        "bus shelter",
+        "bus stop sign",
+        "mailbox",
+        "trash can",
+        "recycling bin",
+        "street light",
+        "utility pole",
+        "manhole cover",
+    ],
+    "road_marking": [
+        "bike lane",
+        "crosswalk",
+    ],
+    "construction": [
+        "scaffolding",
+        "construction barrier",
+        "construction fence",
+    ],
+    "vendor": [
+        "food cart",
+        "food truck",
+    ],
+    "waste": [
+        "dumpster",
+        "garbage bag",
+    ],
+}
+
+# Offset for YOLO-World class IDs to avoid conflicts with COCO (0-79)
+WORLD_CLASS_ID_OFFSET: int = 100
+
+# Build flat ordered list and lookup for YOLO-World classes
+WORLD_CLASS_LIST: list[str] = []
+WORLD_CLASS_LOOKUP: dict[int, tuple[str, str]] = {}
+_idx = WORLD_CLASS_ID_OFFSET
+for _cat, _classes in WORLD_CATEGORIES.items():
+    for _cls_name in _classes:
+        WORLD_CLASS_LIST.append(_cls_name)
+        WORLD_CLASS_LOOKUP[_idx] = (_cat, _cls_name)
+        _idx += 1
+
+
+# --------------- Zone Analysis Rules --------------- #
+
 # Which categories get curb/travel/bike zone-occupancy flags
-ZONE_ANALYSIS_CATEGORIES: set[str] = {"vehicle", "cyclist", "street_furniture"}
+ZONE_ANALYSIS_CATEGORIES: set[str] = {
+    "vehicle", "cyclist", "street_furniture",
+    # YOLO-World categories that occupy space in zones
+    "road_infrastructure", "construction", "vendor", "waste",
+}
 
 # Which categories count as potential obstructions (e.g. in bike lane)
-OBSTRUCTION_CATEGORIES: set[str] = {"vehicle", "cyclist", "street_furniture", "personal_item"}
+OBSTRUCTION_CATEGORIES: set[str] = {
+    "vehicle", "cyclist", "street_furniture", "personal_item",
+    "road_infrastructure", "construction", "vendor", "waste",
+}
 
 # --------------- YOLO ---------------
-YOLO_MODEL_NAME: str = "yolov8n.pt"  # nano; swap to yolov8s.pt / yolov8m.pt for accuracy
-YOLO_CONFIDENCE: float = 0.35
+YOLO_MODEL_NAME: str = "yolov8s.pt"  # upgraded from nano for better detection
+YOLO_CONFIDENCE: float = 0.30
 YOLO_IOU_NMS: float = 0.45
 
 # --------------- ROI / Overlap ---------------
@@ -95,6 +163,7 @@ BEHAVIOR_COLORS_RGB: dict[str, tuple[int, int, int]] = {
 }
 
 CATEGORY_COLORS_RGB: dict[str, tuple[int, int, int]] = {
+    # COCO categories
     "vehicle": (255, 165, 0),          # orange
     "pedestrian": (0, 191, 255),       # deep sky blue
     "cyclist": (50, 205, 50),          # lime green
@@ -102,4 +171,10 @@ CATEGORY_COLORS_RGB: dict[str, tuple[int, int, int]] = {
     "animal": (255, 105, 180),         # hot pink
     "personal_item": (148, 103, 189),  # medium purple
     "street_furniture": (139, 90, 43), # saddle brown
+    # YOLO-World categories
+    "road_infrastructure": (105, 105, 105),  # dim gray
+    "road_marking": (255, 255, 0),     # yellow
+    "construction": (255, 69, 0),      # red-orange
+    "vendor": (0, 128, 128),           # teal
+    "waste": (128, 0, 0),              # maroon
 }

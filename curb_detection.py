@@ -1,4 +1,4 @@
-"""Core street-scene detection: YOLO object detection + ROI overlap classification."""
+"""Core street-scene detection: YOLO + YOLO-World open-vocabulary detection + ROI overlap classification."""
 
 import json
 from dataclasses import dataclass, field
@@ -19,6 +19,11 @@ from curb_config import (
     YOLO_MODEL_NAME,
     YOLO_CONFIDENCE,
     YOLO_IOU_NMS,
+    YOLO_WORLD_MODEL_NAME,
+    YOLO_WORLD_CONFIDENCE,
+    WORLD_CLASS_LIST,
+    WORLD_CLASS_LOOKUP,
+    WORLD_CLASS_ID_OFFSET,
     OVERLAP_THRESHOLD,
     DEFAULT_ROI_PATH,
     ZONE_COLORS_RGB,
@@ -35,7 +40,7 @@ from curb_config import (
 class Detection:
     """A single detected object."""
     label: str
-    category: str  # e.g. "vehicle", "pedestrian", "street_infrastructure"
+    category: str  # e.g. "vehicle", "pedestrian", "road_infrastructure"
     bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2)
     confidence: float
     class_id: int
@@ -181,11 +186,11 @@ def classify_detections(
 
 
 # ------------------------------------------------------------------ #
-#  YOLO Detector
+#  YOLO COCO Detector
 # ------------------------------------------------------------------ #
 
 class StreetSceneDetector:
-    """Wraps ultralytics YOLO for NYC street-scene object detection."""
+    """Wraps ultralytics YOLO for NYC street-scene object detection (COCO classes)."""
 
     def __init__(
         self,
@@ -267,6 +272,121 @@ VehicleDetector = StreetSceneDetector
 
 
 # ------------------------------------------------------------------ #
+#  YOLO-World Open-Vocabulary Detector
+# ------------------------------------------------------------------ #
+
+class InfrastructureDetector:
+    """YOLO-World open-vocabulary detector for street infrastructure.
+
+    Detects objects that standard COCO models cannot: bollards, bike lanes,
+    scaffolding, food carts, dumpsters, construction barriers, etc.
+    """
+
+    def __init__(
+        self,
+        model_name: str = YOLO_WORLD_MODEL_NAME,
+        confidence: float = YOLO_WORLD_CONFIDENCE,
+        iou_threshold: float = YOLO_IOU_NMS,
+        device: Optional[str] = None,
+        custom_classes: Optional[list[str]] = None,
+    ):
+        self.model = YOLO(model_name)
+        self.confidence = confidence
+        self.iou_threshold = iou_threshold
+        self.device = device
+
+        # Set the open-vocabulary class prompts
+        classes = custom_classes if custom_classes is not None else WORLD_CLASS_LIST
+        self.model.set_classes(classes)
+        self._classes = classes
+
+    def _parse_results(self, results) -> list[list[Detection]]:
+        """Convert YOLO-World results to Detection objects.
+
+        YOLO-World returns class indices based on the order of set_classes().
+        We map these to our WORLD_CLASS_ID_OFFSET-based IDs.
+        """
+        all_dets: list[list[Detection]] = []
+        for result in results:
+            frame_dets: list[Detection] = []
+            boxes = result.boxes
+            if boxes is None or len(boxes) == 0:
+                all_dets.append(frame_dets)
+                continue
+            for i in range(len(boxes)):
+                local_idx = int(boxes.cls[i].item())
+                if local_idx < 0 or local_idx >= len(self._classes):
+                    continue
+                global_id = WORLD_CLASS_ID_OFFSET + local_idx
+                lookup = WORLD_CLASS_LOOKUP.get(global_id)
+                if lookup is None:
+                    continue
+                category, label = lookup
+                conf = float(boxes.conf[i].item())
+                x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+                frame_dets.append(Detection(
+                    label=label,
+                    category=category,
+                    bbox=(int(x1), int(y1), int(x2), int(y2)),
+                    confidence=conf,
+                    class_id=global_id,
+                ))
+            all_dets.append(frame_dets)
+        return all_dets
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        """Run open-vocabulary inference on a single BGR frame."""
+        results = self.model.predict(
+            source=frame,
+            conf=self.confidence,
+            iou=self.iou_threshold,
+            device=self.device,
+            verbose=False,
+        )
+        parsed = self._parse_results(results)
+        return parsed[0] if parsed else []
+
+    def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        """Run open-vocabulary inference on a batch of BGR frames."""
+        results = self.model.predict(
+            source=frames,
+            conf=self.confidence,
+            iou=self.iou_threshold,
+            device=self.device,
+            verbose=False,
+        )
+        return self._parse_results(results)
+
+
+# ------------------------------------------------------------------ #
+#  Combined Detector (COCO + YOLO-World)
+# ------------------------------------------------------------------ #
+
+class CombinedDetector:
+    """Runs both COCO and YOLO-World detectors and merges results."""
+
+    def __init__(
+        self,
+        coco_detector: StreetSceneDetector,
+        world_detector: InfrastructureDetector,
+    ):
+        self.coco = coco_detector
+        self.world = world_detector
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        """Run both detectors on a single frame and merge."""
+        dets = self.coco.detect(frame)
+        dets.extend(self.world.detect(frame))
+        return dets
+
+    def detect_batch(self, frames: list[np.ndarray]) -> list[list[Detection]]:
+        """Run both detectors on a batch and merge per-frame."""
+        coco_results = self.coco.detect_batch(frames)
+        world_results = self.world.detect_batch(frames)
+        return [c + w for c, w in zip(coco_results, world_results)]
+
+
+# ------------------------------------------------------------------ #
 #  Frame-Level Aggregation Helper
 # ------------------------------------------------------------------ #
 
@@ -327,13 +447,16 @@ def _build_frame_result(
 
 def analyze_frame(
     frame: np.ndarray,
-    detector: StreetSceneDetector,
+    detector,
     roi_masks: dict[str, np.ndarray],
     frame_index: int = 0,
     timestamp_sec: float = 0.0,
     overlap_threshold: float = OVERLAP_THRESHOLD,
 ) -> FrameResult:
-    """Full pipeline for one frame: detect -> classify -> aggregate."""
+    """Full pipeline for one frame: detect -> classify -> aggregate.
+
+    detector can be StreetSceneDetector, InfrastructureDetector, or CombinedDetector.
+    """
     dets = detector.detect(frame)
     classified = classify_detections(dets, roi_masks, overlap_threshold)
     return _build_frame_result(classified, frame_index, timestamp_sec, overlap_threshold)
