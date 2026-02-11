@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.vscode/
+.claude/
+curb_output/
+*.pt
