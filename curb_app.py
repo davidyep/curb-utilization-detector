@@ -34,9 +34,12 @@ from curb_detection import (
     InfrastructureDetector,
     CombinedDetector,
     FrameResult,
+    ClassifiedDetection,
     load_roi_polygons,
     build_roi_masks,
+    analyze_frame,
     draw_annotated_frame,
+    _build_frame_result,
 )
 from curb_video import (
     process_video,
@@ -154,6 +157,22 @@ def build_detector(
         world = get_world_detector(world_conf, iou)
         return CombinedDetector(coco, world)
     return coco
+
+
+# ------------------------------------------------------------------ #
+#  Post-detection category filter
+# ------------------------------------------------------------------ #
+
+def _filter_results(
+    results: list[FrameResult],
+    allowed_categories: set[str],
+) -> list[FrameResult]:
+    """Filter detections by allowed categories and rebuild FrameResults."""
+    filtered: list[FrameResult] = []
+    for fr in results:
+        kept = [cd for cd in fr.detections if cd.detection.category in allowed_categories]
+        filtered.append(_build_frame_result(kept, fr.frame_index, fr.timestamp_sec))
+    return filtered
 
 
 # ------------------------------------------------------------------ #
@@ -352,12 +371,16 @@ with tab_analyze:
             with st.spinner("Detecting objects..."):
                 img = cv2.imread(analysis_path)
                 roi_masks = build_roi_masks(roi_polys, img.shape[:2])
-                from curb_detection import analyze_frame as _af
-                single_result = _af(img, detector, roi_masks, overlap_threshold=overlap_thresh)
+                single_result = analyze_frame(img, detector, roi_masks, overlap_threshold=overlap_thresh)
                 results = [single_result]
 
-            # Show annotated image
-            annotated = draw_annotated_frame(img, single_result, roi_polys)
+        # Filter results by selected categories
+        all_allowed = set(selected_categories) | set(selected_world_categories)
+        results = _filter_results(results, all_allowed)
+
+        # Show annotated image (after filtering) for single images
+        if not is_video and img is not None:
+            annotated = draw_annotated_frame(img, results[0], roi_polys)
             st.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), use_container_width=True)
 
         # Store results in session state
