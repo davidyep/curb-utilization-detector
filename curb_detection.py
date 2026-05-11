@@ -7,8 +7,6 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
-
 from curb_config import (
     VEHICLE_CLASS_IDS,
     COCO_CATEGORIES,
@@ -200,6 +198,8 @@ class StreetSceneDetector:
         device: Optional[str] = None,
         categories: Optional[set[str]] = None,
     ):
+        from ultralytics import YOLO
+
         self.model = YOLO(model_name)
         self.confidence = confidence
         self.iou_threshold = iou_threshold
@@ -290,6 +290,8 @@ class InfrastructureDetector:
         device: Optional[str] = None,
         custom_classes: Optional[list[str]] = None,
     ):
+        from ultralytics import YOLO
+
         self.model = YOLO(model_name)
         self.confidence = confidence
         self.iou_threshold = iou_threshold
