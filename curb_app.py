@@ -13,6 +13,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
 from curb_config import (
     COCO_CATEGORIES,
     WORLD_CATEGORIES,
@@ -87,6 +92,29 @@ batch_size = st.sidebar.slider(
     "Batch Size", 1, 32, DEFAULT_BATCH_SIZE, 1,
 )
 
+# --- Compute device ---
+available_devices = ["auto", "cpu"]
+if torch is not None:
+    if torch.cuda.is_available():
+        available_devices.append("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        available_devices.append("mps")
+
+device_choice = st.sidebar.selectbox(
+    "Compute Device",
+    options=available_devices,
+    index=0,
+    help="Use GPU when available for faster inference.",
+)
+selected_device = None if device_choice == "auto" else device_choice
+if device_choice == "auto":
+    if torch is not None and torch.cuda.is_available():
+        st.sidebar.caption("Auto device: CUDA GPU")
+    elif torch is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        st.sidebar.caption("Auto device: Apple MPS")
+    else:
+        st.sidebar.caption("Auto device: CPU")
+
 # --- YOLO-World toggle ---
 st.sidebar.divider()
 enable_world = st.sidebar.toggle(
@@ -132,30 +160,43 @@ else:
 
 @st.cache_resource
 def get_coco_detector(
-    mn: str, conf: float, iou: float, cats: frozenset | None = None,
+    mn: str, conf: float, iou: float, cats: frozenset | None = None, device: str | None = None,
 ) -> StreetSceneDetector:
     return StreetSceneDetector(
         model_name=mn,
         confidence=conf,
         iou_threshold=iou,
         categories=set(cats) if cats else None,
+        device=device,
     )
 
 
 @st.cache_resource
-def get_world_detector(conf: float, iou: float) -> InfrastructureDetector:
-    return InfrastructureDetector(confidence=conf, iou_threshold=iou)
+def get_world_detector(conf: float, iou: float, device: str | None = None) -> InfrastructureDetector:
+    return InfrastructureDetector(confidence=conf, iou_threshold=iou, device=device)
 
 
 def build_detector(
     mn: str, conf: float, iou: float,
-    cats: frozenset | None, use_world: bool, world_conf: float,
+    cats: frozenset | None, use_world: bool, world_conf: float, device: str | None,
 ):
     """Build the appropriate detector based on settings."""
-    coco = get_coco_detector(mn, conf, iou, cats)
+    coco = get_coco_detector(mn, conf, iou, cats, device)
     if use_world:
-        world = get_world_detector(world_conf, iou)
-        return CombinedDetector(coco, world)
+        try:
+            world = get_world_detector(world_conf, iou, device)
+            return CombinedDetector(coco, world)
+        except ModuleNotFoundError as exc:
+            # YOLO-World in some ultralytics versions needs optional `clip`.
+            # Keep analysis usable by falling back to COCO-only detection.
+            if exc.name == "clip":
+                st.warning(
+                    "YOLO-World is enabled, but its optional dependency "
+                    "`clip` is not installed in this environment. "
+                    "Running analysis with COCO detections only."
+                )
+                return coco
+            raise
     return coco
 
 
@@ -331,7 +372,7 @@ with tab_analyze:
         cats_frozen = frozenset(selected_categories) if selected_categories else None
         detector = build_detector(
             model_name, yolo_conf, YOLO_IOU_NMS,
-            cats_frozen, enable_world, world_conf,
+            cats_frozen, enable_world, world_conf, selected_device,
         )
 
         if is_video:
